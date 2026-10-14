@@ -1,0 +1,122 @@
+import os
+import shutil
+
+from lib.cuckoo.common.exceptions import CuckooCriticalError
+from lib.cuckoo.common.path_utils import path_exists
+from modules.machinery import qemu as cape_qemu
+
+
+cape_qemu.QEMU_ARGS["arm64"] = {
+    "cmdline": [
+        "/usr/bin/qemu-system-aarch64",
+        "-name",
+        "{vmname}",
+        "-machine",
+        "virt,gic-version=3",
+        "-accel",
+        "tcg,thread=multi",
+        "-smp",
+        "4",
+        "-m",
+        "{memory}",
+        "-drive",
+        "if=pflash,format=raw,readonly=on,file=/usr/share/AAVMF/AAVMF_CODE.fd",
+        "-drive",
+        "if=pflash,format=raw,file={imagepath}/AAVMF_VARS.runtime.fd",
+        "-drive",
+        "id=osdisk,if=none,format=qcow2,file={snapshot_path}",
+        "-device",
+        "virtio-blk-pci,drive=osdisk",
+        "-drive",
+        "id=seed,if=none,format=raw,readonly=on,file={imagepath}/seed.img",
+        "-device",
+        "virtio-blk-pci,drive=seed",
+        "-netdev",
+        "user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22,"
+        "hostfwd=tcp:127.0.0.1:8000-:8000",
+        "-device",
+        "virtio-net-pci,netdev=net0,mac={mac},romfile=",
+        "-display",
+        "none",
+        "-serial",
+        "file:{imagepath}/console.log",
+        "-monitor",
+        "stdio",
+    ],
+    "params": {
+        "memory": "4G",
+    },
+}
+
+
+class QEMUExternal(cape_qemu.QEMU):
+    """QEMU ARM64 guest managed through a disposable QCOW2 overlay."""
+
+    module_name = "qemu_external"
+
+    def _initialize_check(self):
+        manager = self.options.get(self.module_name)
+        qemu_path = manager.get("path")
+
+        if not qemu_path or not path_exists(qemu_path):
+            raise CuckooCriticalError(
+                f"QEMU binary not found: {qemu_path}"
+            )
+
+        self.qemu_dir = os.path.dirname(qemu_path)
+        self.qemu_img = os.path.join(self.qemu_dir, "qemu-img")
+
+        if not path_exists(self.qemu_img):
+            raise CuckooCriticalError(
+                f"qemu-img not found: {self.qemu_img}"
+            )
+
+        firmware = "/usr/share/AAVMF/AAVMF_CODE.fd"
+        if not path_exists(firmware):
+            raise CuckooCriticalError(
+                f"AAVMF firmware not found: {firmware}"
+            )
+
+        for machine_id in manager.get("machines"):
+            machine = self.options.get(machine_id.strip())
+            image = machine.get("image")
+
+            if not image or not path_exists(image):
+                raise CuckooCriticalError(
+                    f"Golden image not found for {machine_id}: {image}"
+                )
+
+            image_dir = os.path.dirname(image)
+
+            for filename in (
+                "AAVMF_VARS.golden.fd",
+                "seed.img",
+            ):
+                filepath = os.path.join(image_dir, filename)
+                if not path_exists(filepath):
+                    raise CuckooCriticalError(
+                        f"Required guest file not found: {filepath}"
+                    )
+
+    def start(self, label):
+        machine = self.db.view_machine_by_label(label)
+        machine_options = getattr(self.options, machine.name)
+        image_dir = os.path.dirname(machine_options.image)
+
+        golden_vars = os.path.join(
+            image_dir,
+            "AAVMF_VARS.golden.fd",
+        )
+        runtime_vars = os.path.join(
+            image_dir,
+            "AAVMF_VARS.runtime.fd",
+        )
+        console_log = os.path.join(image_dir, "console.log")
+
+        shutil.copyfile(golden_vars, runtime_vars)
+        os.chmod(runtime_vars, 0o600)
+
+        if os.path.exists(console_log):
+            os.unlink(console_log)
+
+        return super().start(label)

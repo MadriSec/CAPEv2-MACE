@@ -137,7 +137,10 @@ class ParseProcessLog(list):
                 if syscall.startswith("clone"):
                     if "CLONE_THREAD" in event["args"]:
                         self.children_ids.append((int(retval), "(thread)"))
-                    elif "flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD" in event["args"]:
+                    elif (
+                        "flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD" in event["args"]
+                        or ("CLONE_VFORK" in event["args"] and "SIGCHLD" in event["args"])
+                    ):
                         self.children_ids.append((int(retval), "(fork)"))
                 else:
                     # append children and the corresponding API call that spawns it

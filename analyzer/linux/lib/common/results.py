@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 BUFSIZE = 1024 * 1024
 
 
-def upload_to_host(file_path, dump_path, pids="", ppids="", metadata="", category="", duplicated=False):
+def upload_to_host(file_path, dump_path, pids="", ppids="", metadata="", category="", duplicated=False, source_path=None):
     nc = None
     if not os.path.exists(file_path):
         log.warning("File %s doesn't exist anymore", file_path)
@@ -30,7 +30,7 @@ def upload_to_host(file_path, dump_path, pids="", ppids="", metadata="", categor
     try:
         nc = NetlogFile()
         # nc = NetlogBinary(file_path.encode("utf-8", "replace"), dump_path, duplicate)
-        nc.init(dump_path, file_path, pids, ppids, metadata, category, duplicated)
+        nc.init(dump_path, source_path if source_path is not None else file_path, pids, ppids, metadata, category, duplicated)
         if not duplicated and file_path:
             with open(file_path, "rb") as infd:
                 buf = infd.read(BUFSIZE)

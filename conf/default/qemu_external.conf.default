@@ -1,0 +1,71 @@
+[qemu_external]
+# One installed QEMU binary; the guest arch selects the actual executable
+# from this directory. qemu-img must also be present in the same directory.
+path = /usr/bin/qemu-system-x86_64
+
+# Add a section for each guest, with its own architecture and boot settings.
+machines = cape1
+interface = br0
+
+[cape1]
+label = cape1
+image =
+snapshot =
+
+# Existing CAPE profiles: x86/x64/arm/arm64/armwrt/mips/mipsel/
+# powerpc/powerpc64/sh4/sparc/sparc64. Empty uses the x64 disk profile.
+arch = x64
+cpu =
+enable_kvm = no
+memory = 1024M
+platform = linux
+ip =
+mac = 52:54:00:12:34:56
+
+# Kernel boot uses the existing architecture profile. Override these when
+# needed by ARM32/ARM64 or other kernel-boot guests.
+kernel =
+initrd =
+
+# Firmware boot is optional and belongs to this guest, including x86 UEFI.
+# Configuring firmware replaces the kernel-boot profile with a disk-boot
+# profile. Use AAVMF for ARM64 or OVMF for x64, as appropriate for the image.
+# Paths may contain {imagepath} and {vmname}.
+# firmware = /usr/share/AAVMF/AAVMF_CODE.fd
+# firmware_vars = {imagepath}/AAVMF_VARS.golden.fd
+# A fresh writable copy is created for every start. Its default path is:
+# firmware_vars_runtime = {imagepath}/firmware_vars_{vmname}.fd
+# seed_image = {imagepath}/seed.img
+# console_log = {imagepath}/console_{vmname}.log
+
+# Optional per-guest overrides. No ARM firmware, CPU count or accelerator
+# is imposed on other guests.
+# qemu_path = /usr/bin/qemu-system-aarch64
+# qemu_machine = virt,gic-version=3
+# smp = 4
+# accel = tcg,thread=multi
+
+# TAP uses the existing profile and interface tap_{vmname}.
+# User networking forwards the CAPE Agent on this guest's configured host
+# IP, port 8000. Use distinct host IPs for multiple guests in user mode.
+network = tap
+# ssh_port = 2222
+
+# Optional relay for user networking. It uses the host Result Server
+# address/port from cuckoo.conf and requires socat.
+resultserver_relay = no
+# resultserver_ip = 10.0.2.100
+# resultserver_port = 2042
+# socat_path = /usr/bin/socat
+
+# PCAP capture uses the actual netdev from the selected guest profile.
+# capture_netdev = net_cape1
+# Agent readiness defaults to the critical timeout from cuckoo.conf.
+# agent_timeout = 600
+
+# Optional MACE analysis network. Enabled only when analysis_tap is set.
+# analysis_tap =
+# analysis_bridge =
+# analysis_mac =
+# analysis_lab_state =
+# analysis_network_model defaults to this guest profile's network device.

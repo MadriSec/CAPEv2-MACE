@@ -8,6 +8,7 @@ import logging
 import os
 import pkgutil
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -105,7 +106,7 @@ def dump_memory(pid):
         ) as output_file:
             for line in maps_file:
                 # Reference: https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html
-                m = re.match(r"^([0-9a-f]+)-([0-9a-f]+) ([-rwxsp]{4}) ([0-9a-f]+) (\d\d:\d\d) (\d+) *(.*)$", line)
+                m = re.match(r"^([0-9a-f]+)-([0-9a-f]+) ([-rwxsp]{4}) ([0-9a-f]+) ([0-9a-fA-F]+:[0-9a-fA-F]+) (\d+) *(.*)$", line)
                 if not m:
                     log.error("Could not parse memory map line for pid %s: %s", pid, line)
                     continue
@@ -119,8 +120,29 @@ def dump_memory(pid):
                     end = int(m.group(2), 16)
                     try:
                         mem_file.seek(start)
-                        chunk = mem_file.read(end - start)
-                        output_file.write(chunk)
+                        # Protection codes used by the ProcDump container.
+                        if "x" in perms:
+                            protection = 0x40 if "w" in perms else 0x20
+                        else:
+                            protection = 0x04 if "w" in perms else 0x02
+
+                        position = start
+                        while position < end:
+                            chunk = mem_file.read(min(1024 * 1024, end - position))
+                            if not chunk:
+                                log.warning(
+                                    "Memory read returned no data for PID %s at 0x%x",
+                                    pid, position,
+                                )
+                                break
+
+                            # State and type are unavailable; preserve them as unknown.
+                            header = struct.pack(
+                                "<QIIII", position, len(chunk), 0, 0, protection
+                            )
+                            output_file.write(header)
+                            output_file.write(chunk)
+                            position += len(chunk)
                     except (OSError, ValueError) as e:
                         log.error("Could not read memory range %x-%x (%s) (%s): %s", start, end, perms, pathname, e)
     except FileNotFoundError:

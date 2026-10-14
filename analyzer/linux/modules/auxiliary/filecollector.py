@@ -1,12 +1,13 @@
 import hashlib
 import logging
 import os
+import tempfile
 import time
 from threading import Thread
 
 from lib.common.abstracts import Auxiliary
 from lib.common.constants import ROOT
-from lib.common.hashing import hash_file
+from lib.common.results import config as upload_config
 from lib.common.results import upload_to_host
 
 try:
@@ -20,6 +21,36 @@ except ImportError:
 log = logging.getLogger(__name__)
 DELAY = 1
 BUFSIZE = 1024 * 1024
+
+
+def upload_collected_file(file_path, uploaded_hashes):
+    with open(file_path, "rb") as source:
+        remaining = os.fstat(source.fileno()).st_size
+        if remaining > int(upload_config.upload_max_size) and not upload_config.do_upload_max_size:
+            log.warning("Collected file is too large: %s", file_path)
+            return
+
+        with tempfile.NamedTemporaryFile(prefix="filecollector-", dir=ROOT) as frozen:
+            digest = hashlib.sha256()
+            while remaining:
+                block = source.read(min(BUFSIZE, remaining))
+                if not block:
+                    break
+                frozen.write(block)
+                digest.update(block)
+                remaining -= len(block)
+
+            frozen.flush()
+            sha256 = digest.hexdigest()
+            if sha256 in uploaded_hashes:
+                return
+
+            upload_to_host(
+                frozen.name,
+                os.path.join("files", sha256),
+                source_path=file_path,
+            )
+            uploaded_hashes.append(sha256)
 
 
 class FileCollector(Auxiliary):
@@ -102,7 +133,7 @@ class FileCollector(Auxiliary):
         try:
             while self.do_run:  # loop in case more events appear while we are processing
                 self.event_notifier.process_events()
-                if self.event_notifier.check_events():
+                if self.event_notifier.check_events(timeout=500):
                     self.event_notifier.read_events()
         except Exception as e:
             log.error("Exception in loop %s", e)
@@ -146,13 +177,7 @@ class FileCollector(Auxiliary):
 
                 try:
                     # log.info("Trying to collect file %s", event.pathname)
-                    sha256 = hash_file(hashlib.sha256, event.pathname)
-                    if sha256 in self.uploadedHashes:
-                        # log.info("Already collected file %s", event.pathname)
-                        return
-                    upload_path = os.path.join("files", sha256)
-                    upload_to_host(event.pathname, upload_path)
-                    self.uploadedHashes.append(sha256)
+                    upload_collected_file(event.pathname, self.uploadedHashes)
                     return
                 except Exception as e:
                     log.info('Error dumping file from path "%s": %s', event.pathname, e)

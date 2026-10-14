@@ -1,0 +1,24 @@
+[qemu_external]
+path = /usr/bin/qemu-system-aarch64
+machines = cape_arm64
+interface =
+
+[cape_arm64]
+label = cape-arm64
+
+image = /var/lib/cape/guest-arm64/cape-arm64-golden.qcow2
+snapshot =
+
+arch = arm64
+cpu = max
+enable_kvm = no
+memory = 4G
+
+platform = linux
+ip = 127.0.0.1
+
+mac = 52:54:00:12:34:56
+tags = arm,arm64
+
+resultserver_ip = 10.0.2.2
+resultserver_port = 2042

@@ -381,6 +381,15 @@ class QEMU(Machinery):
             except Exception as e:
                 log.exception(e)
 
+    def _get_qemu_args(self, vm_options):
+        """Return a private copy of the command profile for this guest."""
+        arch = getattr(vm_options, "arch", None) or "default"
+        try:
+            profile = QEMU_ARGS[arch]
+        except KeyError as error:
+            raise CuckooMachineError(f"Unsupported QEMU guest architecture: {arch}") from error
+        return {"cmdline": list(profile["cmdline"]), "params": dict(profile.get("params", {}))}
+
     def start(self, label):
         """Start a virtual machine.
         @param label: virtual machine label.
@@ -413,18 +422,17 @@ class QEMU(Machinery):
             except OSError as e:
                 raise CuckooMachineError(f"QEMU failed starting the machine: {e}")
 
-        vm_arch = getattr(vm_options, "arch", "default")
-        arch_config = dict(QEMU_ARGS[vm_arch])
+        arch_config = self._get_qemu_args(vm_options)
         cmdline = arch_config["cmdline"]
         params = dict(QEMU_ARGS["default"]["params"])
-        params.update(QEMU_ARGS[vm_arch]["params"])
+        params.update(arch_config["params"])
 
         params.update(
             {
                 "imagepath": os.path.dirname(vm_options.image),
                 "snapshot_path": snapshot_path,
                 "vmname": vm_info.name,
-                "memory": vm_options.memory,
+                "memory": vm_options.memory or params["memory"],
             }
         )
 
@@ -448,6 +456,9 @@ class QEMU(Machinery):
         if hasattr(vm_options, "cpu") and vm_options.cpu:
             final_cmdline += ["-cpu", vm_options.cpu]
 
+        extra_qemu_args = getattr(self, "_extra_qemu_args", None)
+        if extra_qemu_args is not None:
+            final_cmdline.extend(extra_qemu_args(vm_info, final_cmdline))
         log.debug("Executing QEMU %s", final_cmdline)
 
         try:
