@@ -311,6 +311,12 @@ class Analyzer:
             except Exception as e:
                 log.warning("Cannot execute auxiliary module %s: %s", module.__name__, e)
 
+        if getattr(self.config, "tracee_linux", False) and not any(
+            aux.__class__.__module__ == "modules.auxiliary.tracee" and aux.enabled
+            for aux in aux_enabled
+        ):
+            raise CuckooError("Tracee was requested but did not start; sample execution aborted")
+
         # Start analysis package. If for any reason, the execution of the
         # analysis package fails, we have to abort the analysis.
         try:
