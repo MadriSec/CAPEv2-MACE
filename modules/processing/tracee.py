@@ -124,10 +124,9 @@ class TraceeAnalysis(Processing):
                         continue
 
                     try:
-                        # Parse the outer JSON
-                        wrapper_json = json.loads(ln)
-                        # Parse the inner "log" JSON string
-                        lg = json.loads(wrapper_json["log"])
+                        lg = json.loads(ln)
+                        if isinstance(lg, dict) and "eventName" not in lg and "log" in lg:
+                            lg = json.loads(lg["log"])
                     except (ValueError, KeyError, TypeError):
                         # Skip malformed lines
                         continue

@@ -355,6 +355,7 @@ class FileUpload(ProtocolHandler):
             filepath, pids, ppids, metadata, category, duplicated = None, [], [], b"", b"", False
 
         rel_dump_path = dump_path.decode("utf-8", "replace")
+        is_tracee_log = rel_dump_path == "logs/tracee.log"
         log.debug("Task #%s: Uploading file %s", self.task_id, rel_dump_path)
 
         task_lock, sha256_map, path_map, seen_set = _get_task_file_state(self.task_id)
@@ -423,13 +424,14 @@ class FileUpload(ProtocolHandler):
                         ex_size = os.path.getsize(file_path)
                     except OSError:
                         ex_size = 0
-                    if ex_size > 0 or existing_sha not in sha256_map:
+                    if not is_tracee_log and (ex_size > 0 or existing_sha not in sha256_map):
                         sha256_map.setdefault(existing_sha, rel_dump_path)
 
             # Check if we already stored a file with this exact SHA256.
             # Process memory dumps (memory/<pid>.dmp) are scanned per-PID from disk
             # by ProcessMemory, so only deduplicate against the same rel_dump_path.
-            if rel_dump_path.startswith("memory/"):
+            # TraceeAnalysis reads the log from its canonical path.
+            if is_tracee_log or rel_dump_path.startswith("memory/"):
                 existing_same_hash_rel = rel_dump_path if path_map.get(rel_dump_path) == new_sha256 else None
             else:
                 existing_same_hash_rel = sha256_map.get(new_sha256)
@@ -460,7 +462,8 @@ class FileUpload(ProtocolHandler):
                 # Destination is free and content is unique
                 os.replace(tmp_path, file_path)
                 path_map[rel_dump_path] = new_sha256
-                sha256_map[new_sha256] = rel_dump_path
+                if not is_tracee_log:
+                    sha256_map[new_sha256] = rel_dump_path
                 final_rel_path = rel_dump_path
             else:
                 # Destination path already exists on disk
@@ -476,7 +479,8 @@ class FileUpload(ProtocolHandler):
                         sha256_map.pop(old_sha, None)
                     os.replace(tmp_path, file_path)
                     path_map[rel_dump_path] = new_sha256
-                    sha256_map[new_sha256] = rel_dump_path
+                    if not is_tracee_log:
+                        sha256_map[new_sha256] = rel_dump_path
                     final_rel_path = rel_dump_path
                     log.debug(
                         "Task #%s: Replaced 0-byte file %s with %d bytes (SHA256 %s)",
@@ -531,7 +535,8 @@ class FileUpload(ProtocolHandler):
                         version += 1
                     os.replace(tmp_path, candidate_full)
                     path_map[candidate_rel] = new_sha256
-                    sha256_map[new_sha256] = candidate_rel
+                    if not is_tracee_log:
+                        sha256_map[new_sha256] = candidate_rel
                     final_rel_path = candidate_rel
                     log.info(
                         "Task #%s: Versioned colliding file %s -> %s (SHA256 %s)",

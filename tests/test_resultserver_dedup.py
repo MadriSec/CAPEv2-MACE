@@ -500,4 +500,23 @@ def test_bson_store_parse_message_truncated_header():
         with open(bson_path, "rb") as f:
             assert f.read() == b"\x00\x00extra_stream_bytes"
 
+def test_tracee_log_keeps_its_path_across_deduplication(tmp_path):
+    payload = b'{"eventName":"read"}\n'
+    collected = "files/tracee-copy"
+    log_path = "logs/tracee.log"
+    guest_path = "/tmp/cape-tracee-test/tracee.log"
+
+    for task_id, paths in (
+        (999995, (collected, log_path)),
+        (999996, (log_path, collected)),
+    ):
+        storage = tmp_path / str(task_id)
+        storage.mkdir()
+        for destination in (*paths, log_path, "files/another-copy"):
+            _upload_file(task_id, str(storage), destination, guest_path, payload)
+
+        assert (storage / log_path).read_bytes() == payload
+        assert (storage / collected).read_bytes() == payload
+        assert not (storage / "logs/tracee_1.log").exists()
+        assert not (storage / "files/another-copy").exists()
 
