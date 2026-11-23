@@ -5,15 +5,14 @@
 import os
 import logging
 import shlex
-import subprocess
-from threading import Thread, Event
+from threading import Thread
 
 from lib.api.process import Process
 from lib.common.exceptions import CuckooPackageError
 from lib.common.constants import OPT_ARGUMENTS
 from lib.common.parse_elf import is_elf_image
 from lib.common.results import NetlogFile, append_buffer_to_host
-from lib.core.packages import strace_command
+from lib.core.packages import launch_sample
 
 log = logging.getLogger(__name__)
 
@@ -30,7 +29,6 @@ class Package:
         # Добавляем переменные для поддержки strace
         self.nc = NetlogFile()
         self.thread = None
-        self._read_ready_ev = Event()
         self.proc = None
 
     def set_pids(self, pids):
@@ -51,7 +49,6 @@ class Package:
 
     def thread_send_strace_buffer(self):
         """A thread that reads strace output and sends it to the host machine."""
-        self._read_ready_ev.wait()
         if self.proc and self.proc.stderr:
             for line in self.proc.stderr:
                 try:
@@ -63,22 +60,11 @@ class Package:
                     log.exception("Exception occurred during strace streaming: %s", e)
 
     def execute(self, cmd):
-        """Start an executable for analysis with strace tracking."""
-        final_cmd = strace_command(shlex.split(cmd), self.options)
-        self.nc.init("logs/strace.log", False)
-        log.info("Executing with strace: %s", shlex.join(final_cmd))
-
-        self.thread = Thread(target=self.thread_send_strace_buffer, daemon=True)
-        self.thread.start()
-
-        self.proc = subprocess.Popen(
-            final_cmd,
-            env={"XAUTHORITY": "/root/.Xauthority", "DISPLAY": ":0"},
-            stderr=subprocess.PIPE,
-        )
-
-        self._read_ready_ev.set()
-
+        """Start an executable using the analysis tracer mode."""
+        self.proc = launch_sample(shlex.split(cmd), self.options, self.nc)
+        if self.options["tracer"] != "tracee":
+            self.thread = Thread(target=self.thread_send_strace_buffer, daemon=True)
+            self.thread.start()
         return self.proc.pid
 
     def package_files(self):

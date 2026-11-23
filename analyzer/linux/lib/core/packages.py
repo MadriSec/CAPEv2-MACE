@@ -10,9 +10,9 @@ import pwd
 import shlex
 import shutil
 import subprocess
-import timeit
 from os import environ, makedirs, path, sys
-from threading import Event, Thread
+from pathlib import Path
+from threading import Thread
 
 from lib.common.constants import OPT_CURDIR
 from lib.common.results import NetlogFile, append_buffer_to_host
@@ -114,11 +114,31 @@ def create_custom_folders(directory_path: str):
 
 
 SAMPLE_USER = "cape-sample"
+SAMPLE_LAUNCHER = Path(__file__).resolve().parents[2] / "cape-sample-run"
+
+
+def select_tracer(options, tracee_available):
+    default = "both" if tracee_available else "strace"
+    tracer = options.get("tracer", default)
+    if tracer not in ("strace", "tracee", "both"):
+        raise ValueError("tracer must be strace, tracee, or both")
+    if tracer != "strace" and not tracee_available:
+        raise ValueError("This profile has Tracee disabled")
+    return tracer
 
 
 def get_sample_account():
+    account = pwd.getpwnam(SAMPLE_USER)
+    if account.pw_uid == 0 or account.pw_gid == 0:
+        raise ValueError(f"{SAMPLE_USER} must have a non-root UID and GID")
+    return account
+
+
+def prepare_sample_account(options):
+    if _string_to_bool(options.get("run_as_root", False)):
+        return
     try:
-        account = pwd.getpwnam(SAMPLE_USER)
+        get_sample_account()
     except KeyError:
         subprocess.run(
             ["sudo", "-n", "/usr/sbin/useradd", "--system", "--user-group",
@@ -126,43 +146,72 @@ def get_sample_account():
             check=True,
             timeout=30,
         )
-        account = pwd.getpwnam(SAMPLE_USER)
+        get_sample_account()
 
-    if account.pw_uid == 0 or account.pw_gid == 0:
-        raise ValueError(f"{SAMPLE_USER} must have a non-root UID and GID")
-    return account
+
+def sample_target(target, options):
+    if options.get("nohuman"):
+        target = ["xterm", "-hold", "-e", *target]
+    if _string_to_bool(options.get("run_as_root", False)):
+        log.info("Sample execution requested as root (UID 0)")
+    else:
+        account = get_sample_account()
+        log.info("Sample execution requested as %s (UID %d)", SAMPLE_USER, account.pw_uid)
+        target = [
+            "/usr/bin/setpriv",
+            f"--reuid={account.pw_uid}",
+            f"--regid={account.pw_gid}",
+            "--clear-groups",
+            "--no-new-privs",
+            "--reset-env",
+            "--",
+            *target,
+        ]
+
+    if options.get("tracer", "strace") != "strace":
+        target = [str(SAMPLE_LAUNCHER), *target]
+    return target
 
 
 def strace_command(target, options):
-    run_as_root = _string_to_bool(options.get("run_as_root", False))
     trace_args = shlex.split(options.get("strace_args", "").replace(";", ","))
-    command = ["sudo", "-n", "strace", "-o", "/dev/stderr", "-s", "800", *trace_args, "-ttf", "--"]
-    if options.get("nohuman"):
-        target = ["xterm", "-hold", "-e", *target]
-    if run_as_root:
-        log.info("Sample execution requested as root (UID 0)")
-        return [*command, *target]
-
     # Injection and other tracer controls could alter the privilege drop itself.
-    if len(trace_args) % 2 or any(
-        flag != "-e" or not expression.startswith("trace=")
-        for flag, expression in zip(trace_args[::2], trace_args[1::2])
+    if not _string_to_bool(options.get("run_as_root", False)) and (
+        len(trace_args) % 2 or any(
+            flag != "-e" or not expression.startswith("trace=")
+            for flag, expression in zip(trace_args[::2], trace_args[1::2])
+        )
     ):
         raise ValueError("Non-root analysis only supports strace_args filters of the form '-e trace=...'")
-
-    account = get_sample_account()
-    log.info("Sample execution requested as %s (UID %d)", SAMPLE_USER, account.pw_uid)
     return [
-        *command,
-        "/usr/bin/setpriv",
-        f"--reuid={account.pw_uid}",
-        f"--regid={account.pw_gid}",
-        "--clear-groups",
-        "--no-new-privs",
-        "--reset-env",
-        "--",
-        *target,
+        "sudo", "-n", "strace", "-o", "/dev/stderr", "-s", "800", *trace_args, "-ttf", "--",
+        *sample_target(target, options),
     ]
+
+
+def launch_sample(target, options, strace_log):
+    tracer = options["tracer"]
+    use_strace = tracer != "tracee"
+    if tracer != "strace":
+        # The guest agent extracts the analyzer ZIP without executable bits.
+        SAMPLE_LAUNCHER.chmod(0o700)
+
+    if use_strace:
+        command = strace_command(target, options)
+        strace_log.init("logs/strace.log", False)
+    else:
+        command = ["sudo", "-n", *sample_target(target, options)]
+    log.info("Executing sample (tracer=%s): %s", tracer, shlex.join(command))
+    try:
+        return subprocess.Popen(
+            command,
+            env={"XAUTHORITY": "/root/.Xauthority", "DISPLAY": ":0"},
+            stderr=subprocess.PIPE if use_strace else None,
+        )
+    except OSError:
+        if use_strace:
+            strace_log.close()
+        raise
 
 
 class Package:
@@ -191,8 +240,6 @@ class Package:
 
         # Choose an analysis method (or fallback to apicalls)
         self.method = self.options.get("method", "apicalls")
-        # Should our target be launched as root or not
-        self.run_as_root = _string_to_bool(self.options.get("run_as_root", "False"))
         # free: do not inject our monitor.
         self.free = self.options.get("free")
         self.proc = None
@@ -200,7 +247,6 @@ class Package:
         self.strace_output = kwargs.get("strace_output", "/tmp")
         self.nc = NetlogFile()
         self.thread = None
-        self._read_ready_ev = Event()
 
     def set_pids(self, pids):
         """Update list of monitored PIDs in the package context.
@@ -242,10 +288,11 @@ class Package:
             self.target = filepath.rstrip("/")
         self.target = self.move_curdir(self.target)
         self.prepare()
-        self.nc.init("logs/strace.log", False)
-        self.thread = Thread(target=self.thread_send_strace_buffer, daemon=True)
-        self.thread.start()
-        self.strace_analysis()
+        target = [*shlex.split(self.target), *self.args]
+        self.proc = launch_sample(target, self.options, self.nc)
+        if self.options["tracer"] != "tracee":
+            self.thread = Thread(target=self.thread_send_strace_buffer, daemon=True)
+            self.thread.start()
 
         return self.proc.pid
 
@@ -261,8 +308,6 @@ class Package:
         return None
 
     def thread_send_strace_buffer(self):
-        # wait for the subprocess to start
-        self._read_ready_ev.wait()
         for line in self.proc.stderr:
             try:
                 append_buffer_to_host(line, self.nc)
@@ -282,33 +327,6 @@ class Package:
 
     def get_pids(self):
         return []
-
-    def strace_analysis(self):
-        target = [*shlex.split(self.target), *self.args]
-        cmd = strace_command(target, self.options)
-        log.info("Executing with strace: %s", shlex.join(cmd))
-        self.proc = subprocess.Popen(
-            cmd, env={"XAUTHORITY": "/root/.Xauthority", "DISPLAY": ":0"}, stderr=subprocess.PIPE
-        )
-        self._read_ready_ev.set()
-        log.info("Process started with strace")
-        return True
-
-    def normal_analysis(self):
-        kwargs = {"args": self.args, "timeout": self.timeout, "run_as_root": self.run_as_root}
-
-        # cmd = apicalls(self.target, **kwargs)
-        cmd = f"{self.target} {' '.join(kwargs['args'])}"
-        process_start = timeit.default_timer()
-        self.proc = subprocess.Popen(
-            cmd, env={"XAUTHORITY": "/root/.Xauthority", "DISPLAY": ":0"}, stderr=subprocess.PIPE, shell=True
-        )
-
-        log.debug(self.proc.stderr.readline())
-
-        process_stop = timeit.default_timer()
-        log.info("Process startup took %.2f seconds", process_start - process_stop)
-        return True
 
     @staticmethod
     def _upload_file(local, remote):

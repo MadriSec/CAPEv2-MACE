@@ -24,7 +24,7 @@ POLICY = Path(__file__).resolve().parent / "tracee" / "policy.yml"
 
 class Tracee(Auxiliary):
     def __init__(self, options, config):
-        self.enabled = config.tracee_linux
+        self.enabled = options["tracer"] != "strace"
         super().__init__(options, config)
         self.process = None
 
@@ -39,7 +39,9 @@ class Tracee(Auxiliary):
             "sudo", "-n", TRACEE, "--signatures-dir", SIGNATURES,
             "--policy", str(POLICY), "--output", "json",
             "--output", "option:parse-arguments,exec-env,exec-hash",
+            "--proctree", "source=both",
             "--capture", "bpf", "--capture", "module", "--capture", "exec",
+            "--capture", "mem",
             "--capture", f"dir:{self.run_dir}", "--log", "debug",
         ]
         with self.events.open("wb") as events, self.stderr.open("wb") as stderr:
