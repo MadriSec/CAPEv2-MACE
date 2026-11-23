@@ -6,6 +6,8 @@
 import inspect
 import importlib
 import logging
+import pwd
+import shlex
 import shutil
 import subprocess
 import timeit
@@ -109,6 +111,58 @@ def create_custom_folders(directory_path: str):
             log.info("%s created", directory_path)
         except OSError:
             log.error("Unable to create user-defined custom folder directory")
+
+
+SAMPLE_USER = "cape-sample"
+
+
+def get_sample_account():
+    try:
+        account = pwd.getpwnam(SAMPLE_USER)
+    except KeyError:
+        subprocess.run(
+            ["sudo", "-n", "/usr/sbin/useradd", "--system", "--user-group",
+             "--create-home", "--shell", "/usr/sbin/nologin", SAMPLE_USER],
+            check=True,
+            timeout=30,
+        )
+        account = pwd.getpwnam(SAMPLE_USER)
+
+    if account.pw_uid == 0 or account.pw_gid == 0:
+        raise ValueError(f"{SAMPLE_USER} must have a non-root UID and GID")
+    return account
+
+
+def strace_command(target, options):
+    run_as_root = _string_to_bool(options.get("run_as_root", False))
+    trace_args = shlex.split(options.get("strace_args", "").replace(";", ","))
+    command = ["sudo", "-n", "strace", "-o", "/dev/stderr", "-s", "800", *trace_args, "-ttf", "--"]
+    if options.get("nohuman"):
+        target = ["xterm", "-hold", "-e", *target]
+    if run_as_root:
+        log.info("Sample execution requested as root (UID 0)")
+        return [*command, *target]
+
+    # Injection and other tracer controls could alter the privilege drop itself.
+    if len(trace_args) % 2 or any(
+        flag != "-e" or not expression.startswith("trace=")
+        for flag, expression in zip(trace_args[::2], trace_args[1::2])
+    ):
+        raise ValueError("Non-root analysis only supports strace_args filters of the form '-e trace=...'")
+
+    account = get_sample_account()
+    log.info("Sample execution requested as %s (UID %d)", SAMPLE_USER, account.pw_uid)
+    return [
+        *command,
+        "/usr/bin/setpriv",
+        f"--reuid={account.pw_uid}",
+        f"--regid={account.pw_gid}",
+        "--clear-groups",
+        "--no-new-privs",
+        "--reset-env",
+        "--",
+        *target,
+    ]
 
 
 class Package:
@@ -230,26 +284,12 @@ class Package:
         return []
 
     def strace_analysis(self):
-        kwargs = {"args": self.args, "timeout": self.timeout, "run_as_root": self.run_as_root}
-        log.info(self.target)
-
-        target_cmd = f"{self.target}"
-        if "args" in kwargs:
-            target_cmd += f' {" ".join(kwargs["args"])}'
-
-        # eg: strace_args=-e trace=!recvfrom;epoll_pwait
-        strace_args = self.options.get("strace_args", "").replace(";", ",")
-        # Tricking strace into always showing PID on stderr output
-        # https://github.com/strace/strace/issues/278#issuecomment-1815914576
-        cmd = f"sudo strace -o /dev/stderr -s 800 {strace_args} -ttf {target_cmd}"
-        # If nohuman is set to yes, it's possible to interact with interactive scripts or programs via VNC.
-        if self.options.get("nohuman"):
-            cmd = f"sudo strace -o /dev/stderr -s 800 {strace_args} -ttf xterm -hold -e {target_cmd}"
-        log.info(cmd)
+        target = [*shlex.split(self.target), *self.args]
+        cmd = strace_command(target, self.options)
+        log.info("Executing with strace: %s", shlex.join(cmd))
         self.proc = subprocess.Popen(
-            cmd, env={"XAUTHORITY": "/root/.Xauthority", "DISPLAY": ":0"}, stderr=subprocess.PIPE, shell=True
+            cmd, env={"XAUTHORITY": "/root/.Xauthority", "DISPLAY": ":0"}, stderr=subprocess.PIPE
         )
-        # give the reader thread a go-ahead
         self._read_ready_ev.set()
         log.info("Process started with strace")
         return True
@@ -281,6 +321,8 @@ class Package:
 
 
 def _string_to_bool(raw):
+    if isinstance(raw, bool):
+        return raw
     if not isinstance(raw, str):
-        raise Exception("Unexpected input: not a string :/")
+        raise ValueError("run_as_root must be a boolean")
     return raw.lower() in ("yes", "true", "t", "1")

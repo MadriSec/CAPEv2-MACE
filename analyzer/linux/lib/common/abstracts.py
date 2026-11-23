@@ -4,6 +4,7 @@
 
 import os
 import logging
+import shlex
 import subprocess
 from threading import Thread, Event
 
@@ -12,6 +13,7 @@ from lib.common.exceptions import CuckooPackageError
 from lib.common.constants import OPT_ARGUMENTS
 from lib.common.parse_elf import is_elf_image
 from lib.common.results import NetlogFile, append_buffer_to_host
+from lib.core.packages import strace_command
 
 log = logging.getLogger(__name__)
 
@@ -62,15 +64,9 @@ class Package:
 
     def execute(self, cmd):
         """Start an executable for analysis with strace tracking."""
+        final_cmd = strace_command(shlex.split(cmd), self.options)
         self.nc.init("logs/strace.log", False)
-        strace_args = self.options.get("strace_args", "").replace(";", ",")
-
-        if self.options.get("nohuman"):
-            final_cmd = f"sudo strace -o /dev/stderr -s 800 {strace_args} -ttf xterm -hold -e {cmd}"
-        else:
-            final_cmd = f"sudo strace -o /dev/stderr -s 800 {strace_args} -ttf {cmd}"
-
-        log.info("Executing with strace: %s", final_cmd)
+        log.info("Executing with strace: %s", shlex.join(final_cmd))
 
         self.thread = Thread(target=self.thread_send_strace_buffer, daemon=True)
         self.thread.start()
@@ -79,7 +75,6 @@ class Package:
             final_cmd,
             env={"XAUTHORITY": "/root/.Xauthority", "DISPLAY": ":0"},
             stderr=subprocess.PIPE,
-            shell=True
         )
 
         self._read_ready_ev.set()
